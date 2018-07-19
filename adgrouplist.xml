@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<groups>
+ <group>
+   <Name>RL.APP.Helios.Admin</Name>
+ </group>
+ <group>
+   <Name>RL.App.Helios.mul.Approver.Delivery</Name>
+ </group>
+ <group>
+   <Name>RL.App.Helios.Approver.Release</Name>
+ </group>
+ <group>
+   <Name>RL.App.Helios.mul.Approver.ProdSupport</Name>
+ </group>
+ <group>
+   <Name>RL.App.Helios.Approver.ECM</Name>
+ </group>
+ <group>
+   <Name>RL.App.Helios.mul.DeployInitiator</Name>
+ </group>
+</groups>

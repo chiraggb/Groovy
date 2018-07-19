@@ -1,0 +1,477 @@
+def isApproved = 'false'
+// Define global variables
+def userResponseOutput = ''
+def anyp_user=''
+def anyp_password=''
+def apiApprovers=''
+def releaseApprovers=''
+def arti_user=''
+def arti_password=''
+def arti_url=''
+def is_Public='false'
+def assetZipFile= ''
+def logFile=''
+def logOutput=''
+def delOutput= ''
+def status= ''
+def compile=''
+def creds=''
+def apiExists=''
+def envClientID
+def envSecretID
+def GHE_QA = env.GHE_QA
+def credentialParm=''
+
+// Temporary fix until we get SSL certs
+// def nexus3_url = env.nexus3_url
+def nexus3_url = env.nexus3_url_deploy
+// Temporary fix until we get SSL certs
+
+def propsUpdateResp
+def noRTMFound='false'
+def domain= ''
+def job_name = env.JOB_NAME
+
+echo job_name
+job_name = job_name.replace("/","_")
+echo job_name
+
+//Define Function to log and then delete
+ def LogAndClean(tempFiles) {
+    // logFileName = "tmp/" + BUILD_NUMBER + ".log"
+    logFileName = tempFiles + ".log"
+    echo logFileName
+    exists = fileExists(logFileName)
+    echo "${exists}"
+    if (exists) {
+      logOutput = sh(returnStdout: true, script: "cat '${logFileName}'")
+      echo logOutput
+      // Now delete all temporary files created by shell script
+      allTempFiles = tempFiles+"*"
+      delOutput= sh(returnStdout: true, script: "rm ${allTempFiles}")
+    }
+ }
+
+
+//Define Function to clean up the parms_pipeline_repository
+ def ClearTempParmFiles() {
+    logFileName = "${toolsDir}/parms_pipeline_repository/*" + BUILD_NUMBER + ".txt"
+    exists = fileExists(logFileName)
+    if (exists) {
+      delOutput= sh(returnStdout: true, script: "rm ${logFileName}")
+    }
+ }
+timestamps {
+    node('master') {
+        //cleanWS()
+        def toolsDir='tools'
+        def parmsDir='/parms_pipeline_repository'
+        def apiName=''
+        def biz_group=''
+        def cloudhub_environment='SANDBOX'
+        def to_sti_environment='Dev1'
+        def from_sti_environment='Dev1'
+		def appl_asset_type='api'
+        //Below line is for testing purposes.
+        //def asset_version='1.0.0'       
+        properties([
+                parameters([
+                        string(
+                                defaultValue: params.apiName,
+                                description: 'apiName is name of API',
+                                name: 'apiName'
+                        ),
+                        string(
+                                defaultValue: params.biz_group,
+                                description: 'org name business group 3 character abbreviation',
+                                name: 'biz_group'
+                        ),
+                        string(
+                                defaultValue: 'params.cloudhub_environment',
+                                description: 'MuleSoft Anypoint environment name',
+                                name: 'cloudhub_environment'
+                        ),
+                        string(
+                                defaultValue: 'params.to_sti_environment',
+                                description: 'org name environment name',
+                                name: 'to_sti_environment'
+                        ),
+                        string(
+                                defaultValue: 'params.artloc',
+                                description: 'artifacts location',
+                                name: 'artloc'
+                        ),
+						string(
+                                defaultValue: 'params.mulesoftRTMVersion',
+                                description: 'Mulesoft Runtime Version',
+                                name: 'mulesoftRTMVersion'
+                        )
+						//,
+						//string(
+                        //        defaultValue: 'params.applAssetType',
+                        //        description: 'artifacts location',
+                        //        name: 'applAssetType'
+                        //)
+                ])
+        ])
+
+        echo "apiname:" + params.apiName
+        echo "biz group:" + params.biz_group
+        echo "cloudhub_environment:" + params.cloudhub_environment
+        echo "to_sti_environment:" + params.to_sti_environment
+        echo "artifact location:" + params.artloc    
+		echo "mulesoftRTMVersion: " + params.mulesoftRTMVersion
+        def nexusrepoloc =  params.artloc.split("repository/")[1]
+        echo "nexus repo location:" + nexusrepoloc
+		//echo "appl asset type:" + params.applAssetType
+        // Now get the pararmeters passed to this pipeline
+        apiOriginalName = params.apiName
+        apiName= params.apiName //.toLowerCase()
+        biz_group= params.biz_group.toLowerCase()
+        cloudhub_environment = params.cloudhub_environment
+        //from_sti_environment= params.from_sti_environment.toLowerCase()
+        to_sti_environment= params.to_sti_environment.toLowerCase()
+		mulesoftRTMVersion= params.mulesoftRTMVersion
+		//appl_asset_type= params.applAssetType
+        GITBranchName= params.GITBranchName
+		def loc1 =  params.artloc.split("/").last()
+		def loc2 =  loc1.split("-").last()
+		def version = loc2.substring(0, loc2.length() - 4)
+		def asset_version = version
+		echo "API Asset version:" + version
+        // Fold up the cloudhub environment name
+        cloudhub_environment = cloudhub_environment.toUpperCase()
+		//if (appl_asset_type.length() == 0) {
+        //      echo '[FAILURE] No Application Asset Type supplied. Exiting'
+        //      currentBuild.result = 'FAILURE'
+        //      return
+		//} else {
+		//	appl_asset_type= appl_asset_type.toLowerCase()
+		//}
+		if(cloudhub_environment=='PROD'){
+            credentialParm= "MuleSoft-Anypoint-Prod"
+        } else {
+            credentialParm= "MuleSoft-Anypoint-NonProd"
+        }
+
+		
+        stage("setup api tools") {
+            sh "mkdir -p ${toolsDir}"
+            dir(toolsDir) {
+                checkout scm
+            }
+            sh "mkdir -p ${toolsDir}${parmsDir}"
+			sh "mkdir -p target"
+        }
+		
+        def assetLCName= params.apiName.toLowerCase()
+        def repo="mule_repo_local"
+        echo assetLCName
+		
+		// Now check what the asset type is
+		//withCredentials([usernamePassword(credentialsId: "MuleSoft-Anypoint", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+		withCredentials([usernamePassword(credentialsId: credentialParm, usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+        	appl_asset_type= sh(returnStdout: true, script: "${toolsDir}/query_Exchange_Asset.sh \"$USERNAME\" \"$PASSWORD\" '${assetLCName}' ${BUILD_NUMBER}_${job_name}")
+        }
+		
+		if (appl_asset_type == 'undefined') {
+              echo '[FAILURE] No Application Asset Type supplied. Exiting'
+              currentBuild.result = 'FAILURE'
+              return
+		} else {
+			appl_asset_type= appl_asset_type.toLowerCase()
+		}
+		echo "Application asset type is: " + appl_asset_type
+		
+        //asset_version= sh(returnStdout: true, script: "${toolsDir}/get_nexus_latest_API_ver.sh '${apiOriginalName}' '${repo}' '${nexus3_url}'")
+        //asset_version= sh(returnStdout: true, script: "${toolsDir}/get_nexus_latest_API_ver.sh '${artloc}'")
+        def apinm =  artloc.split("/").last()
+        echo "apinm is: " + apinm
+        assetZipFile= apiOriginalName + "-" + asset_version + ".zip"
+        echo "Zip file name is: " + assetZipFile
+        def NexusdownloadSpec = params.artloc      
+        echo "NexusdownloadSpec is" + NexusdownloadSpec
+        CURRENT_PATH= sh (script: 'pwd',returnStdout: true).trim()
+        def NexusDwnLdResp
+        withCredentials([usernamePassword(credentialsId: "Nexus3", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+        	NexusDwnLdResp = sh(returnStdout: true, script: "${toolsDir}/download_API_From_Nexus.sh \"$USERNAME\" \"$PASSWORD\" '${NexusdownloadSpec}' zip ${CURRENT_PATH}/target/'${assetZipFile}'")
+        }
+        //def NexusDwnLdResp = sh(returnStdout: true, script: "${toolsDir}/download_API_From_Nexus.sh '${NexusdownloadSpec}' zip ${CURRENT_PATH}/target/'${assetZipFile}' '${nexus3_url}' ")
+        //def NexusDwnLdResp = sh(returnStdout: true, script: "${toolsDir}/download_API_From_Nexus.sh '${NexusdownloadSpec}' zip ${CURRENT_PATH}/target/'${assetZipFile}'")
+        echo "NexusDwnLdResp is: " + NexusDwnLdResp
+		
+		assetVersShort = sh(returnStdout: true, script: "${toolsDir}/apiVersionShort.sh '${asset_version}'")
+		zipAppName= apiName + "-" + assetVersShort + "-" + biz_group + "-sti-" + to_sti_environment
+		//withCredentials([usernamePassword(credentialsId: "MuleSoft-Anypoint", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+		withCredentials([usernamePassword(credentialsId: credentialParm, usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+        	isAppAlreadyDeployed = sh(returnStdout: true, script: "${toolsDir}/is_API_Already_Deployed.sh \"$USERNAME\" \"$PASSWORD\" '${zipAppName}' ${cloudhub_environment} ${BUILD_NUMBER}_${job_name}")
+        }
+        def responseLength=isAppAlreadyDeployed.length()
+        reDeploy=isAppAlreadyDeployed.substring(responseLength-4, responseLength)
+        if (reDeploy == 'true') {
+          echo "Archive zip file from Nexus will be redeployed in environment '${to_sti_environment}'"
+        } else {
+          reDeploy="false"
+          echo "Archive zip file from Nexus will be deployed for first time in environment '${to_sti_environment}'"
+        }
+		echo "redeploy is: " + reDeploy
+        tempFiles= "/tmp/${BUILD_NUMBER}_${job_name}_is_API_Already_Deployed"
+        LogAndClean(tempFiles)
+		
+		if (appl_asset_type == 'soap-api' | appl_asset_type == 'rest-api') {
+		  //withCredentials([usernamePassword(credentialsId: "MuleSoft-Anypoint", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+		  withCredentials([usernamePassword(credentialsId: credentialParm, usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+			apiExists = sh(returnStdout: true, script: "${toolsDir}/does_APIVersPage_Exists.sh \"$USERNAME\" \"$PASSWORD\" ${apiName} ${asset_version} ${cloudhub_environment} ${to_sti_environment} ${biz_group} ${BUILD_NUMBER}_${job_name}")
+		  }
+          echo apiExists
+          tempFiles= "/tmp/${BUILD_NUMBER}_${job_name}}_get_API_Mgr_Info"
+          LogAndClean(tempFiles)
+
+          if (apiExists == 'ErrorInGetAPIMgrInfo') {
+              // Exist because at this point you do not know whether to create new API page and
+              // RTM asset yet.
+              echo '[FAILURE] Error retrieving API Manager information. Exiting'
+              currentBuild.result = 'FAILURE'
+              return
+          }
+
+          if (apiExists == 'APINotFound') {
+            stage('CreateAPIMgrPage') {
+              // This will create the API Manager page in Anypoint API Manager
+              // and save the api-autodeploy-name and api-autodeploy-version
+              // that is required for the deployment of API and autodiscovery
+
+              //withCredentials([usernamePassword(credentialsId: "MuleSoft-Anypoint", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+			  withCredentials([usernamePassword(credentialsId: credentialParm, usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) { 
+              	 status= sh(returnStatus: true, script: "'${toolsDir}/create_API_Mgr_Page.sh' \"$USERNAME\" \"$PASSWORD\" '${apiName}' '${asset_version}' '${cloudhub_environment}' '${biz_group}' '${to_sti_environment}' null '${mulesoftRTMVersion}' '${BUILD_NUMBER}_${job_name}'")
+              }
+              tempFiles= "/tmp/${BUILD_NUMBER}_${job_name}_create_API_In_RTM"
+              LogAndClean(tempFiles)
+              if (status != 0) {
+              	  echo '[FAILURE] Create_API_In_RTM was not successful'
+                 currentBuild.result = 'FAILURE'
+                 return
+              }
+            }
+
+            apiLCName= apiName.toLowerCase()
+            propFileName="${toolsDir}/parms_pipeline_repository/${apiLCName}-${cloudhub_environment}-${BUILD_NUMBER}_${job_name}.txt"
+            if (!fileExists("${propFileName}")) {
+               echo '[FAILURE] No build properties for ${propFileName}. Exiting'
+               currentBuild.result = 'FAILURE'
+               return
+            }
+            def props = readProperties file: "${propFileName}"
+            /*
+             * From build properties file
+            */
+            grpID= props["grpID"]
+            assetVersion= props["assetVersion"]
+            envID= props["envID"]
+            environmentName= props["environmentName"]
+            orgID= props["orgID"]
+            apiVersion= props["apiVersion"]
+            assetID= props["assetID"]
+            apiID= props["apiID"]
+            autoInsName= props["autoInsName"]
+            apiAutoDeployName= props["apiAutoDeployName"]
+            apiAutoDeployVersion= props["apiAutoDeployVersion"]
+            envClientID= props["envClientID"]
+            envSecretID= props["envSecretID"]
+
+            assetVersShort = sh(returnStdout: true, script: "${toolsDir}/apiVersionShort.sh '${assetVersion}'")
+            applicationName= "'${assetID}'-'${assetVersShort}'-'${biz_group}'-sti-'${to_sti_environment}'"
+          } else {
+              // Pull current API information from RTM
+              assetVersShort = sh(returnStdout: true, script: "${toolsDir}/apiVersionShort.sh '${asset_version}'")
+
+              //withCredentials([usernamePassword(credentialsId: "MuleSoft-Anypoint", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+			  withCredentials([usernamePassword(credentialsId: credentialParm, usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+                status= sh(returnStatus: true, script: "'${toolsDir}/get_RTM_API_Info.sh' \"$USERNAME\" \"$PASSWORD\" '${apiName}' '${asset_version}' '${cloudhub_environment}' '${biz_group}' '${to_sti_environment}' '${BUILD_NUMBER}_${job_name}'")
+              }
+              if (status != 0) {
+              	  //echo '[FAILURE] get_RTM_API_Info was not successful'
+                 //currentBuild.result = 'FAILURE'
+                 //return
+                 noRTMFound= 'true'
+                 envClientID = sh(returnStdout: true, script: "${toolsDir}/get_cloudhub_EnvInfo.sh ${cloudhub_environment} clientid")
+                 envSecretID = sh(returnStdout: true, script: "${toolsDir}/get_cloudhub_EnvInfo.sh ${cloudhub_environment} secretid")
+                 assetVersShort = sh(returnStdout: true, script: "${toolsDir}/apiVersionShort.sh '${asset_version}'")
+                 apiLCName= apiName.toLowerCase()
+                 domain = apiLCName + "-" + assetVersShort + "-" + biz_group + "-" + "sti-" + to_sti_environment
+                 //withCredentials([usernamePassword(credentialsId: "MuleSoft-Anypoint", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+				 withCredentials([usernamePassword(credentialsId: credentialParm, usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+                   status= sh(returnStatus: true, script: "'${toolsDir}/get_API_Info_From_Mgr.sh' \"$USERNAME\" \"$PASSWORD\" '${apiName}' '${asset_version}' '${cloudhub_environment}' '${biz_group}' '${to_sti_environment}' '${BUILD_NUMBER}_${job_name}'")
+                 }
+                 tempFiles= "/tmp/${BUILD_NUMBER}_${job_name}_api_info_from_mgr"
+             	  LogAndClean(tempFiles)
+                 if (status != 0) {
+                   echo '[FAILURE] get_API_INfo_From_Mgr was not successful'
+                   currentBuild.result = 'FAILURE'
+                   return
+                 } else {
+                   apiLCName= apiName.toLowerCase()
+                   stiLCEnvName= params.to_sti_environment.toLowerCase()
+                   propFileName="${toolsDir}/parms_pipeline_repository/APIMGR-${apiLCName}-${cloudhub_environment}-${stiLCEnvName}-${BUILD_NUMBER}_${job_name}.txt"
+                   echo propFileName
+   				   if (!fileExists("${propFileName}")) {
+						echo '[FAILURE] No build properties for ${propFileName}. Exiting'
+						currentBuild.result = 'FAILURE'
+						return
+					}
+					def props = readProperties file: "${propFileName}"
+					/*
+					 * From build properties file
+					 */
+					apiAutoDeployName= props["APIAutoDeployName"]
+					apiAutoDeployVersion= props["APIID"]
+					def prodVersion= props["ProductVersion"]
+					apiAutoDeployVersion= prodVersion + ":" + apiAutoDeployVersion
+					tempFiles= "/tmp/${BUILD_NUMBER}_${job_name}_get_RTM_API_Info"
+					LogAndClean(tempFiles)
+                 }
+              } else {
+       	       apiLCName= apiName.toLowerCase()
+       	       stiLCEnvName= params.to_sti_environment.toLowerCase()
+       	       propFileName="${toolsDir}/parms_pipeline_repository/RTMQuery-${apiLCName}-${cloudhub_environment}-${stiLCEnvName}-${BUILD_NUMBER}_${job_name}.txt"
+       	       echo "${propFileName}"
+       	       if (!fileExists("${propFileName}")) {
+       	            echo '[FAILURE] No build properties for ${propFileName}. Exiting'
+       	            currentBuild.result = 'FAILURE'
+       	            return
+       	        }
+       	        def props = readProperties file: "${propFileName}"
+       		    /*
+       		    * From build properties file
+       		    */
+       	        apiAutoDeployName= props["APIAutoDeployName"]
+       	        apiAutoDeployVersion= props["APIAutoDeployVersion"]
+       	        envClientID= props["apiClientID"]
+       	        envSecretID= props["APISecretID"]
+       	        applicationName= props["domain"]
+       	        tempFiles= "/tmp/${BUILD_NUMBER}_${job_name}_get_RTM_API_Info"
+               	LogAndClean(tempFiles)
+       	      }
+          }
+		} else {
+			assetVersShort = sh(returnStdout: true, script: "${toolsDir}/apiVersionShort.sh '${asset_version}'")
+		}
+        // Already pulled zip file from Nexus archive as deployable
+        // First determine if application already deployed.
+        //zipAppName= apiName + "-" + assetVersShort + "-" + biz_group + "-sti-" + to_sti_environment
+
+        //withCredentials([usernamePassword(credentialsId: "MuleSoft-Anypoint", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+        //	isAppAlreadyDeployed = sh(returnStdout: true, script: "${toolsDir}/is_API_Already_Deployed.sh \"$USERNAME\" \"$PASSWORD\" '${zipAppName}' ${cloudhub_environment} ${BUILD_NUMBER}_${job_name}")
+        //}
+        //def responseLength=isAppAlreadyDeployed.length()
+        //reDeploy=isAppAlreadyDeployed.substring(responseLength-4, responseLength)
+        //if (reDeploy == 'true') {
+        //  echo "Archive zip file from Nexus will be redeployed in environment '${to_sti_environment}'"
+        //} else {
+        //  reDeploy="false"
+        //  echo "Archive zip file from Nexus will be deployed for first time in environment '${to_sti_environment}'"
+        //}
+        //tempFiles= "/tmp/${BUILD_NUMBER}_${job_name}_is_API_Already_Deployed"
+        //LogAndClean(tempFiles)
+
+        assetZipFile= apiName + "-" + asset_version + ".zip"
+        assetZipFile= CURRENT_PATH + "/target/" + assetZipFile
+
+        //withCredentials([usernamePassword(credentialsId: "MuleSoft-Anypoint", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+		withCredentials([usernamePassword(credentialsId: credentialParm, usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+        	zipDeployResp = sh(returnStdout: true, script: "${toolsDir}/deploy_App_To_RTM.sh \"$USERNAME\" \"$PASSWORD\" '${zipAppName}' '${cloudhub_environment}' '${assetZipFile}' '${reDeploy}' Cloudhub '${mulesoftRTMVersion}' ${BUILD_NUMBER}_${job_name}")
+        }
+        if (zipDeployResp == 'ZipDeployToRTMSuccessful') {
+          // Zip file got pushed to RunTime manager successfully.
+          echo "Archive zip file from Nexus got pushed to Runtime Manager successfully"
+        } else {
+          echo "Deployment of archive zip file from Nexus failed. Exiting."
+          echo '[FAILURE] Deployment of archive zip file from Nexus failed'
+          echo zipDeployResp
+          currentBuild.result = 'FAILURE'
+          return
+        }
+
+        logFile= "/tmp/${BUILD_NUMBER}_${job_name}_10.txt"
+        exists = fileExists '${logFile}'
+        if (exists) {
+          logOutput = sh(returnStdout: true, script: "cat '${logFile}'")
+          echo logOutput
+          delOutput= sh(returnStdout: true, script: "rm '${logFile}'")
+        } else {
+          logOutput = ""
+        }
+
+		if (appl_asset_type == 'custom') {
+			apiAutoDeployName= "null"
+       	    apiAutoDeployVersion= "null"
+			envClientID = sh(returnStdout: true, script: "${toolsDir}/get_cloudhub_EnvInfo.sh ${cloudhub_environment} clientid")
+            envSecretID = sh(returnStdout: true, script: "${toolsDir}/get_cloudhub_EnvInfo.sh ${cloudhub_environment} secretid")
+			
+			domain= apiName + "-" + assetVersShort + "-" + biz_group + "-sti-" + to_sti_environment
+			noRTMFound='true'
+			
+		}
+		if (reDeploy == 'false') {
+		  if (noRTMFound=='false') {
+			 // Now, pull the information from the temporary query file from above query of RTM
+			 apiLCName= apiName.toLowerCase()
+			 propFileName="${toolsDir}/parms_pipeline_repository/${apiLCName}-${cloudhub_environment}-${BUILD_NUMBER}_${job_name}.txt"
+			 if (!fileExists("${propFileName}")) {
+		    	 echo 'No build properties.'
+			     currentBuild.result = 'FAILURE'
+				 return
+			 }
+			 def props = readProperties file: "${propFileName}"
+			 apiAutoDeployName= props["apiAutoDeployName"]
+			 apiAutoDeployVersion= props["apiAutoDeployVersion"]
+			 envClientID= props["envClientID"]
+			 envSecretID= props["envSecretID"]
+			 
+			 // Now, you have to update the properties since it is not part of zip upload MuleSoft API
+			 //def domain= apiName + "-" + assetVersShort + "-" + to_sti_environment + "-" + biz_group + "-st"
+			 domain= apiName + "-" + assetVersShort + "-" + biz_group + "-sti-" + to_sti_environment
+		  }
+		  //withCredentials([usernamePassword(credentialsId: "MuleSoft-Anypoint", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+		  withCredentials([usernamePassword(credentialsId: credentialParm, usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+				propsUpdateResp = sh(returnStdout: true, script: "${toolsDir}/update_App_In_RTM.sh \"$USERNAME\" \"$PASSWORD\" '${domain}' '${cloudhub_environment}' Cloudhub ${envClientID} ${envSecretID} '${apiAutoDeployName}' '${apiAutoDeployVersion}' '${mulesoftRTMVersion}' ${BUILD_NUMBER}_${job_name}")
+		  }
+		  if (propsUpdateResp == 'AppPropsUpdateSuccessful') {
+			// Properties got pushed to RunTime manager successfully.
+		    echo "Properties from API Manager Page got pushed to Runtime Manager successfully"
+		  } else {
+			 echo "Properties update to Runtime Manager application failed. Exiting."
+			 echo '[FAILURE] Properties update to Runtime Manager application failed'
+			 currentBuild.result = 'FAILURE'
+			 return
+		  }
+		}
+        tempFiles= "/tmp/${BUILD_NUMBER}_${job_name}_update_App_In_RTM"
+        LogAndClean(tempFiles)
+
+  	stage('Expose Users to API'){
+			if (appl_asset_type == 'soap-api' || appl_asset_type == 'rest-api') {
+			  if (apiExists == 'APINotFound') {
+				// This will expose users to the API.in Anypoint API
+
+				//withCredentials([usernamePassword(credentialsId: "MuleSoft-Anypoint", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+				withCredentials([usernamePassword(credentialsId: credentialParm, usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+						status= sh(returnStatus: true, script: "'${toolsDir}/expose_API_To_Users.sh' '${apiName}' '${assetVersion}' '${is_Public}' '${cloudhub_environment}' \"$USERNAME\" \"$PASSWORD\" '${to_sti_environment}' '${biz_Group}' '${BUILD_NUMBER}_${job_name}'")
+				}
+				tempFiles= "/tmp/${BUILD_NUMBER}_${job_name}_expose_API_To_Users"
+				LogAndClean(tempFiles)
+				if (status != 0) {
+					  echo '[FAILURE] expose_API_To_Users was not successful. Continuing.'
+				}
+			  }
+			}
+        }
+       }
+       //stage('SendEmail')
+       //  {
+       //      mail (to: 'chirag.g.patel@org name.com',
+       //       subject: "Job Number " + BUILD_NUMBER + ";Job Name " + env.JOB_NAME + " has been deployed to " + '${to_sti_environment}',
+       //       body: "Please go to http://10.7.153.216:8080/job/call-approver-pipeline/" + env.JOB_NAME + "/input/");
+       //
+       //  }
+       }

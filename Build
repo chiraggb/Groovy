@@ -1,0 +1,168 @@
+// Define global variables
+def logOutput=''
+def GHE_QA = env.GHE_QA
+def nexus3_url = env.nexus3_url
+def propsUpdateResp
+def logFile=''
+
+import groovy.xml.XmlUtil
+@NonCPS
+def versionnum() {
+ // update version number in pom.xml including build number
+ def pomFileName= CURRENT_PATH + "/pom.xml"
+ def xmlFilePath = new XmlSlurper(false, false).parse(pomFileName)
+ def versioninfo =  "${xmlFilePath.version.text()}"
+ //def buildnum = versioninfo + "-" + env.BUILD_NUMBER
+ def buildnum = "1.0.0"
+ xmlFilePath.version = buildnum
+ XmlUtil xmlUtil = new XmlUtil()
+ xmlUtil.serialize(xmlFilePath, new FileWriter(new File(pomFileName)))
+ return buildnum
+}
+
+//Define Function to log and then delete
+def LogAndClean(tempFiles) {
+  // logFileName = "tmp/" + BUILD_NUMBER + ".log"
+  logFileName = tempFiles + ".log"
+  echo logFileName
+  exists = fileExists(logFileName)
+  echo "${exists}"
+  if (exists) {
+    logOutput = sh(returnStdout: true, script: "cat '${logFileName}'")
+    echo logOutput
+    // Now delete all temporary files created by shell script
+    allTempFiles = tempFiles+"*"
+    delOutput= sh(returnStdout: true, script: "rm ${allTempFiles}")
+  }
+}
+
+
+//Define Function to clean up the parms_pipeline_repository
+def ClearTempParmFiles() {
+  logFileName = "${toolsDir}/parms_pipeline_repository/*" + BUILD_NUMBER + ".txt"
+  exists = fileExists(logFileName)
+  if (exists) {
+    delOutput= sh(returnStdout: true, script: "rm ${logFileName}")
+  }
+}
+
+timestamps {
+  node('master') {
+        //cleanWs()
+        def toolsDir='tools'
+        def gitrepourl=params.gitrepourl
+        def biz_group=''
+        def apinm =  gitrepourl.split("/").last()
+		// Below includes ".git" from repo url.
+        def apiName = apinm.substring(0, apinm.length() - 4)
+        properties([
+                parameters([
+                        string(
+                                defaultValue: '',
+                                description: 'github repo url',
+                                name: 'gitrepourl'
+                        ),
+                        string(
+                                defaultValue: '',
+                                description: 'github branch',
+                                name: 'branchname'
+                        )
+                ])
+        ])
+        // Now get the pararmeters passed to this pipeline
+        apiOriginalName = apiName
+        apiName= apiName.toLowerCase()
+        stage("setup api tools") {
+            sh "mkdir -p ${toolsDir}"
+            dir(toolsDir) {
+                checkout scm
+            }
+        }
+
+        stage('GetCodeFromRep') { // for display purposes
+          // Get build files from repo        
+		  git credentialsId: "GHE", url: params.gitrepourl,  branch: params.branchname
+          CURRENT_PATH= sh (script: 'pwd',returnStdout: true).trim()
+          echo "Current path is: " + CURRENT_PATH
+          def pomFileName= CURRENT_PATH + "/pom.xml"
+          if (!fileExists("${pomFileName}")) {
+            echo '[FAILURE] No pom file found for "${apiName}"'
+            currentBuild.result = 'FAILURE'
+            return
+          }
+          //ver = versionnum()
+          asset_version = sh(returnStdout: true, script: "${toolsDir}/get_Asset_Version_From_POM.sh '${pomFileName}'").split('\n')[0]
+		  runtime_version= sh(returnStdout: true, script: "${toolsDir}/get_RTM_Version_From_POM.sh '${pomFileName}'").split('\n')[0]
+		  if (runtime_version == 'UnapprovedRTMVersionInPOM') {
+              // Exist because at this point you do not know whether to create new API page and
+              // RTM asset yet.
+              echo '[FAILURE] Incorrect MuleSoft runtime version in POM or unapproved by API Services C4E. Exiting'
+              currentBuild.result = 'FAILURE'
+              return
+          }
+		  echo "Mulesoft runtime version is: " + runtime_version
+		  
+		  //appl_asset_type= sh(returnStdout: true, script: "${toolsDir}/get_asset_type_from_POM.sh '${pomFileName}'").split('\n')[0]
+		  //echo "Application Asset Type is: " + appl_asset_type
+		}
+        stage('Maven Test') {
+            // This will run the maven test.  All test suites will be executed
+            withMaven(
+                    maven: 'M352' //Tool name from Jenkins configuration
+            )
+            {
+                // Run the maven build
+                //sh "mvn test"
+            }
+        }
+
+        stage('Maven Build and deploy to MuleSoft') {
+            // Obtain an Nexus server instance, defined in Jenkins --> Manage:
+            withMaven(
+                    maven: 'M352' //Tool name from Jenkins configuration
+
+            )
+            {
+                echo 'Run the maven build'
+                sh "mvn package -DskipTests=true"
+            }
+        }
+
+        stage('Deploy to Nexus'){
+          // Obtain an Nexus server instance, defined in Jenkins --> Manage:
+          withMaven(
+            maven: 'M352' //Tool name from Jenkins configuration
+          )
+          {
+            // Run the maven build
+            def assetLCName= apiName.toLowerCase()
+            def NexusArtifactName = assetLCName + "-" + asset_version + ".zip"
+            echo NexusArtifactName
+            withCredentials([usernamePassword(credentialsId: "Nexus3", usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+              echo "mvn deploy:deploy-file -Dusername=\"$USERNAME\" -Dpassword=\"$PASSWORD\" -DgroupID=com.mycompany -DartifactId=${apiOriginalName} -Dversion=${asset_version} -DgeneratePom=false -Dpackaging=zip -DrepositoryId=nexus -Durl=${nexus3_url}/repository/DevOps -DpomFile=pom.xml -Dfile=${CURRENT_PATH}/target/${NexusArtifactName} -DskipTests=true"
+              sh "mvn deploy:deploy-file -Dusername=\"$USERNAME\" -Dpassword=\"$PASSWORD\" -DgroupID=com.mycompany -DartifactId=${apiOriginalName} -Dversion=${asset_version} -DgeneratePom=false -Dpackaging=zip -DrepositoryId=nexus -Durl=${nexus3_url}/repository/DevOps -DpomFile=pom.xml -Dfile=${CURRENT_PATH}/target/${NexusArtifactName} -DskipTests=true"
+             // Sends Mulesoft runtime version back to version1 for caching value
+	         sleep (8)
+	         def mgr = manager.getLogMatcher('.*Mulesoft runtime version is: (.*)$')
+             if (mgr.matches()) {
+              msgout=mgr.group(1)
+              def artver = "[V1ARTIFACT:{\"name\": \"mulesoftRTMVersion\", \"location\": \"${msgout}\"} ]"
+              echo artver
+             }                    	    
+		     //def mgr1 = manager.getLogMatcher('.*Application Asset Type is: (.*)$')
+             //if (mgr1.matches()) {
+             //  msgout1=mgr1.group(1)
+             //  def applassettype = "[V1ARTIFACT:{\"name\": \"applAssetType\", \"location\": \"${msgout1}\"} ]"
+             //  echo applassettype
+             //}                  	    
+             def manager = manager.getLogMatcher('.*\\[INFO\\] Uploading to nexus: (.*)$')
+             if (manager.matches()) {
+               buildMsg=manager.group(1)
+               def artifacts = "[V1ARTIFACT:{\"name\": \"payload\", \"location\": \"2.0.0|${buildMsg}\"} ]"
+               echo artifacts
+             }
+            }
+          }
+        }
+  }
+}
